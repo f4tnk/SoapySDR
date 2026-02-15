@@ -1,41 +1,41 @@
-# Optimisations SDR — SoapySDR Core (F4TNK)
+# SDR Optimizations — SoapySDR Core (F4TNK)
 
-> **Branche** : `master-f4tnk`
-> **Auteur** : F4TNK — Station SatNOGS #3762
-> **Date** : Février 2026
-> **Base** : [pothosware/SoapySDR](https://github.com/pothosware/SoapySDR)
-
----
-
-## Vue d'ensemble
-
-SoapySDR est le **middleware central** de la chaîne SDR : chaque échantillon radio transite par ses convertisseurs de format avant d'atteindre GNU Radio ou tout autre démodulateur. Les convertisseurs d'origine sont des **boucles scalaires** traitant **1 échantillon par cycle CPU**.
-
-Cette branche remplace les 12 chemins de conversion les plus critiques par des implémentations **SSE2 SIMD** traitant **4 à 16 échantillons par cycle**, avec prefetch matériel, cache thread-local et un MTU 64× plus grand.
-
-**19 optimisations** — Gain estimé : **×4 à ×8 sur les conversions de format**.
+> **Branch**: `master-f4tnk`
+> **Author**: F4TNK — SatNOGS Station #3762
+> **Date**: February 2026
+> **Upstream**: [pothosware/SoapySDR](https://github.com/pothosware/SoapySDR)
 
 ---
 
-## Architecture des optimisations
+## Overview
+
+SoapySDR is the **core middleware** of the SDR stack: every radio sample passes through its format converters before reaching GNU Radio or any other demodulator. The original converters are **scalar loops** processing **1 sample per CPU cycle**.
+
+This branch replaces the 12 most critical conversion paths with **SSE2 SIMD** implementations processing **4 to 16 samples per cycle**, with hardware prefetch, thread-local cache, and a 64× larger MTU.
+
+**19 optimizations** — Estimated gain: **×4 to ×8 on format conversions**.
+
+---
+
+## Optimization Architecture
 
 ```mermaid
 graph TB
-    subgraph "Couche Application"
+    subgraph "Application Layer"
         GR["GNU Radio<br/>gr-satellites / gr-satnogs"]
         APP["SatNOGS Client"]
     end
 
-    subgraph "SoapySDR Core — Optimisations F4TNK"
+    subgraph "SoapySDR Core — F4TNK Optimizations"
         direction TB
-        CACHE["Thread-Local Cache<br/>O(1) au lieu de O(3×log n)"]
-        REG["ConverterRegistry<br/>Priorité : CUSTOM > VECTORIZED > GENERIC"]
-        SIMD["SIMDConverters.cpp<br/>12 fonctions SSE2 + Prefetch"]
-        MTU["MTU 65536<br/>×64 vs défaut"]
-        FLAGS["Compilation<br/>-march=native -ffast-math<br/>-ftree-vectorize -flto"]
+        CACHE["Thread-Local Cache<br/>O(1) instead of O(3×log n)"]
+        REG["ConverterRegistry<br/>Priority: CUSTOM > VECTORIZED > GENERIC"]
+        SIMD["SIMDConverters.cpp<br/>12 SSE2 functions + Prefetch"]
+        MTU["MTU 65536<br/>×64 vs default"]
+        FLAGS["Compiler Flags<br/>-march=native -ffast-math<br/>-ftree-vectorize -flto"]
     end
 
-    subgraph "Couche Driver"
+    subgraph "Driver Layer"
         AIR["SoapyAirspy<br/>CS16 / CF32"]
         RTL["SoapyRTLSDR<br/>CU8"]
         HACK["SoapyHackRF<br/>CS8"]
@@ -62,26 +62,26 @@ graph TB
 
 ---
 
-## Pipeline de conversion SSE2
+## SSE2 Conversion Pipeline
 
 ```mermaid
 graph LR
-    subgraph "Avant — Scalaire"
+    subgraph "Before — Scalar"
         S1["for i=0..N"]
         S2["src[i] → cast → scale"]
-        S3["dst[i] = résultat"]
+        S3["dst[i] = result"]
         S1 --> S2 --> S3
     end
 
-    subgraph "Après — SSE2 SIMD"
+    subgraph "After — SSE2 SIMD"
         V1["Prefetch src+256"]
         V2["_mm_loadu 128 bits<br/>4-16 samples"]
-        V3["Conversion vectorielle<br/>4 ops simultanées"]
+        V3["Vectorized conversion<br/>4 ops simultaneous"]
         V4["_mm_storeu 128 bits"]
-        V5["Queue scalaire"]
+        V5["Scalar tail"]
         V1 --> V2 --> V3 --> V4
         V4 -->|"i < total"| V1
-        V4 -->|"reste"| V5
+        V4 -->|"remainder"| V5
     end
 
     style S1 fill:#e74c3c,color:#fff
@@ -96,7 +96,7 @@ graph LR
 
 ---
 
-## Convertisseurs SIMD — Couverture complète
+## SIMD Converters — Full Coverage
 
 ```mermaid
 graph LR
@@ -104,7 +104,7 @@ graph LR
     CS8["CS8<br/>HackRF"]
     CS16["CS16<br/>AirSpy"]
     CU16["CU16<br/>SDRPlay"]
-    CF32["CF32<br/>Float natif"]
+    CF32["CF32<br/>Native float"]
 
     CU8 -->|"SSE2 ×4"| CF32
     CF32 -->|"SSE2 ×4"| CU8
@@ -115,8 +115,8 @@ graph LR
     CU16 -->|"SSE2 ×4"| CF32
     CF32 -->|"SSE2 ×4"| CU16
 
-    CU8 -->|"SSE2 ×16<br/>Integer direct"| CS16
-    CS16 -->|"SSE2 ×16<br/>Integer direct"| CU8
+    CU8 -->|"SSE2 ×16<br/>Direct integer"| CS16
+    CS16 -->|"SSE2 ×16<br/>Direct integer"| CU8
 
     CF32 -.->|"memcpy / SIMD"| CF32
     CS16 -.->|"memcpy / SIMD"| CS16
@@ -130,23 +130,23 @@ graph LR
 
 ---
 
-## Système de priorité du ConverterRegistry
+## ConverterRegistry Priority System
 
 ```mermaid
 graph TB
     CALL["getFunction(CS16, CF32)"]
-    CACHE_HIT{"Cache<br/>thread_local ?"}
+    CACHE_HIT{"thread_local<br/>cache hit?"}
     LOOKUP["Triple lookup<br/>map→map→map"]
     
-    P0["GENERIC (0)<br/>Boucle scalaire"]
+    P0["GENERIC (0)<br/>Scalar loop"]
     P3["VECTORIZED (3)<br/>SSE2 SIMD ★"]
-    P5["CUSTOM (5)<br/>Plugin externe"]
+    P5["CUSTOM (5)<br/>External plugin"]
 
-    RESULT["Meilleure priorité<br/>→ rbegin()"]
+    RESULT["Highest priority<br/>→ rbegin()"]
 
     CALL --> CACHE_HIT
-    CACHE_HIT -->|"OUI — O(1)"| RESULT
-    CACHE_HIT -->|"NON"| LOOKUP
+    CACHE_HIT -->|"YES — O(1)"| RESULT
+    CACHE_HIT -->|"NO"| LOOKUP
     LOOKUP --> P0
     LOOKUP --> P3
     LOOKUP --> P5
@@ -162,24 +162,24 @@ graph TB
 
 ---
 
-## Impact du MTU sur le débit
+## MTU Impact on Throughput
 
 ```mermaid
 graph LR
-    subgraph "Défaut — MTU 1024"
+    subgraph "Default — MTU 1024"
         A1["readStream()"]
         A2["1024 samples"]
-        A3["overhead appel"]
+        A3["call overhead"]
         A1 --> A2 --> A3
-        A3 -->|"×64 appels<br/>pour 65536 samples"| A1
+        A3 -->|"×64 calls<br/>for 65536 samples"| A1
     end
 
     subgraph "F4TNK — MTU 65536"
         B1["readStream()"]
         B2["65536 samples"]
-        B3["overhead appel"]
+        B3["call overhead"]
         B1 --> B2 --> B3
-        B3 -->|"×1 appel<br/>pour 65536 samples"| B1
+        B3 -->|"×1 call<br/>for 65536 samples"| B1
     end
 
     style A3 fill:#e74c3c,color:#fff
@@ -189,12 +189,12 @@ graph LR
 
 ---
 
-## Tableau des 19 optimisations
+## All 19 Optimizations
 
-### Convertisseurs SIMD (`SIMDConverters.cpp` — NOUVEAU)
+### SIMD Converters (`SIMDConverters.cpp` — NEW)
 
-| # | Conversion | Technique | Samples/itération | SDR concerné |
-|:-:|:-----------|:----------|:-----------------:|:-------------|
+| # | Conversion | Technique | Samples/iteration | Target SDR |
+|:-:|:-----------|:----------|:-----------------:|:-----------|
 | 1 | CS16 → CF32 | SSE2 unpack + sign-extend + `_mm_cvtepi32_ps` | **8** | AirSpy R2 |
 | 2 | CF32 → CS16 | SSE2 `_mm_cvtps_epi32` + `_mm_packs_epi32` | **8** | AirSpy R2 |
 | 3 | CU8 → CF32 | SSE2 zero-extend + offset 128 + scale | **8** | RTL-SDR |
@@ -203,77 +203,77 @@ graph LR
 | 6 | CF32 → CS8 | SSE2 `_mm_packs_epi32` → `_mm_packs_epi16` | **8** | HackRF |
 | 7 | CU16 → CF32 | SSE2 zero-extend + offset 32768 + scale | **8** | SDRPlay |
 | 8 | CF32 → CU16 | SSE2 scale + clamp + bias shift pack | **8** | SDRPlay |
-| 9 | CU8 → CS16 | SSE2 **integer direct** — zéro float | **16** | RTL-SDR → int16 |
-| 10 | CS16 → CU8 | SSE2 **integer direct** — shift + pack | **16** | int16 → RTL-SDR |
-| 11 | CF32 → CF32 | `memcpy` fast-path / SSE2 scale | **4** | Tous |
-| 12 | CS16 → CS16 | `memcpy` fast-path / SSE2 scale via float | **8** | Tous |
+| 9 | CU8 → CS16 | SSE2 **direct integer** — zero float conversion | **16** | RTL-SDR → int16 |
+| 10 | CS16 → CU8 | SSE2 **direct integer** — shift + pack | **16** | int16 → RTL-SDR |
+| 11 | CF32 → CF32 | `memcpy` fast-path / SSE2 scale | **4** | All |
+| 12 | CS16 → CS16 | `memcpy` fast-path / SSE2 scale via float | **8** | All |
 
-### Prefetch matériel
+### Hardware Prefetch
 
-| # | Détail | Impact |
+| # | Detail | Impact |
 |:-:|:-------|:-------|
-| 13 | `_mm_prefetch(_MM_HINT_T0)` sur les 12 boucles SIMD | Réduit les cache misses L1/L2 de ~30% |
+| 13 | `_mm_prefetch(_MM_HINT_T0)` on all 12 SIMD loops | Reduces L1/L2 cache misses by ~30% |
 
-### Cache de lookup (`ConverterRegistry.cpp`)
+### Lookup Cache (`ConverterRegistry.cpp`)
 
-| # | Détail | Impact |
+| # | Detail | Impact |
 |:-:|:-------|:-------|
-| 14 | Cache `thread_local` sur `getFunction()` | O(1) au lieu de O(3×log n) par buffer |
+| 14 | `thread_local` cache on `getFunction()` | O(1) instead of O(3×log n) per buffer |
 
-### MTU élargi (`Device.cpp`)
+### Enlarged MTU (`Device.cpp`)
 
-| # | Détail | Impact |
+| # | Detail | Impact |
 |:-:|:-------|:-------|
-| 15 | `getStreamMTU()` : 1024 → **65 536** | ×64 moins d'appels par seconde |
+| 15 | `getStreamMTU()`: 1024 → **65,536** | ×64 fewer calls per second |
 
-### Flags de compilation (`CMakeLists.txt`)
+### Compiler Flags (`CMakeLists.txt`)
 
-| # | Flag | Rôle |
-|:-:|:-----|:-----|
-| 16 | `-march=native` | Instructions CPU natives (SSE4, AVX si dispo) |
-| 17 | `-ffast-math` | Optimisations FP agressives |
-| 18 | `-ftree-vectorize` | Auto-vectorisation du compilateur |
-| 19 | `-flto` | Link-Time Optimization inter-modules |
+| # | Flag | Purpose |
+|:-:|:-----|:--------|
+| 16 | `-march=native` | Native CPU instructions (SSE4, AVX if available) |
+| 17 | `-ffast-math` | Aggressive floating-point optimizations |
+| 18 | `-ftree-vectorize` | Compiler auto-vectorization |
+| 19 | `-flto` | Link-Time Optimization across modules |
 
 ---
 
-## Fichiers modifiés
+## Modified Files
 
 ```
 lib/
-├── SIMDConverters.cpp        ★ NOUVEAU — 722 lignes, 12 fonctions SSE2
+├── SIMDConverters.cpp        ★ NEW — 722 lines, 12 SSE2 functions
 ├── DefaultConverters.cpp     ★ Hook lateLoadSIMDConverters()
-├── ConverterRegistry.cpp     ★ Cache thread_local getFunction()
+├── ConverterRegistry.cpp     ★ Thread-local cache for getFunction()
 ├── Device.cpp                ★ MTU 65536
-└── CMakeLists.txt            ★ Flags + source SIMD
+└── CMakeLists.txt            ★ Flags + SIMD source
 ```
 
 ---
 
-## Compatibilité
+## Platform Compatibility
 
-| Plateforme | Comportement |
-|:-----------|:-------------|
-| **x86-64** (Intel/AMD) | SSE2 natif — 4 à 16 samples/cycle |
-| **ARM** (Raspberry Pi) | Fallback scalaire avec `__restrict__` pour auto-vectorisation |
-| **Windows** (MSVC) | SSE2 via `_M_X64`, flags MSVC natifs |
-| **macOS** (Apple Silicon) | Fallback scalaire optimisé |
+| Platform | Behavior |
+|:---------|:---------|
+| **x86-64** (Intel/AMD) | Native SSE2 — 4 to 16 samples/cycle |
+| **ARM** (Raspberry Pi) | Scalar fallback with `__restrict__` for auto-vectorization |
+| **Windows** (MSVC) | SSE2 via `_M_X64`, native MSVC flags |
+| **macOS** (Apple Silicon) | Optimized scalar fallback |
 
-Les flags `-march=native` et `-ffast-math` sont appliqués en **PRIVATE** — ils ne fuient pas vers les consommateurs de la bibliothèque.
+The `-march=native` and `-ffast-math` flags are applied as **PRIVATE** — they do not leak to library consumers.
 
 ---
 
-## Exemples de gains SSE2
+## SSE2 Gain Examples
 
 ### CS16 → CF32 (AirSpy @ 6 MSPS)
 
 ```
-Avant (scalaire) :
-  for (i = 0..12M)     ← 12 millions ops/s (I+Q)
+Before (scalar):
+  for (i = 0..12M)     ← 12 million ops/s (I+Q)
     dst[i] = float(src[i]) / 32768.0;
 
-Après (SSE2) :
-  for (i = 0..12M; i += 8)  ← 1.5 million itérations/s
+After (SSE2):
+  for (i = 0..12M; i += 8)  ← 1.5 million iterations/s
     prefetch(src + 128)
     vi16 = _mm_loadu_si128()     // 8 × int16
     lo32 = sign_extend(lower 4)  // 4 × int32
@@ -284,23 +284,23 @@ Après (SSE2) :
     _mm_storeu_ps(dst+4, fhi)    // 4 floats
 ```
 
-### CU8 → CS16 (RTL-SDR — chemin integer direct)
+### CU8 → CS16 (RTL-SDR — Direct Integer Path)
 
 ```
-Avant : CU8 → CF32 → CS16   (2 conversions float)
-Après : CU8 → CS16 direct   (1 conversion integer, 16 samples/cycle)
+Before: CU8 → CF32 → CS16   (2 float conversions)
+After:  CU8 → CS16 direct   (1 integer conversion, 16 samples/cycle)
 
   vu8  = _mm_loadu_si128()        // 16 × uint8
   vs8  = XOR(vu8, 0x80)           // unsigned → signed
   lo16 = sign_extend(lower 8)     // 8 × int16
   hi16 = sign_extend(upper 8)     // 8 × int16
-  lo16 = _mm_slli_epi16(lo16, 8)  // ×256 pour full-scale
+  lo16 = _mm_slli_epi16(lo16, 8)  // ×256 for full-scale
   hi16 = _mm_slli_epi16(hi16, 8)
 ```
 
 ---
 
-## Compilation
+## Build Instructions
 
 ```bash
 cd /home/f4tnk/dev/SoapySDR
@@ -313,27 +313,27 @@ sudo ldconfig
 
 ---
 
-## Stack SDR complète F4TNK
+## Full F4TNK SDR Stack
 
 ```mermaid
 graph TB
-    subgraph "Station SatNOGS #3762"
+    subgraph "SatNOGS Station #3762"
         SAT["satnogs-client"]
         FG["satnogs-flowgraphs"]
         GRS["gr-satellites"]
         GRSAT["gr-satnogs"]
     end
 
-    subgraph "Middleware — Optimisé F4TNK"
-        SOAPY["SoapySDR Core<br/>★ 19 optimisations"]
-        WRAP["SoapyAirspy<br/>★ 21 optimisations"]
+    subgraph "Middleware — F4TNK Optimized"
+        SOAPY["SoapySDR Core<br/>★ 19 optimizations"]
+        WRAP["SoapyAirspy<br/>★ 21 optimizations"]
     end
 
-    subgraph "Driver — Optimisé F4TNK"
-        AIRSPY["airspyone_host<br/>★ 24 optimisations"]
+    subgraph "Driver — F4TNK Optimized"
+        AIRSPY["airspyone_host<br/>★ 24 optimizations"]
     end
 
-    subgraph "Matériel"
+    subgraph "Hardware"
         HW["AirSpy R2<br/>USB 2.0"]
     end
 
@@ -351,15 +351,15 @@ graph TB
     style HW fill:#f39c12,color:#fff,stroke:#e67e22,stroke-width:2px
 ```
 
-**Total : 64 optimisations** sur la chaîne complète SDR.
+**Total: 64 optimizations** across the full SDR chain.
 
 ---
 
-## Licence
+## License
 
-BSL-1.0 — Compatible avec la licence SoapySDR d'origine.
+BSL-1.0 — Compatible with the original SoapySDR license.
 
 ---
 
-*Optimisations par F4TNK pour la réception satellite faible signal (APRS, AIS, télémétrie).*
-*Station SatNOGS #3762 — 73 de F4TNK*
+*Optimizations by F4TNK for weak-signal satellite reception (APRS, AIS, telemetry).*
+*SatNOGS Station #3762 — 73 de F4TNK*

@@ -5,10 +5,14 @@
 #include <SoapySDR/ConverterRegistry.hpp>
 #include <algorithm>
 #include <stdexcept>
+#include <atomic>
 
 void lateLoadDefaultConverters(void);
 
 static SoapySDR::ConverterRegistry::FormatConverters formatConverters;
+
+// Generation counter: incremented on every registration, checked by thread-local cache
+static std::atomic<unsigned> converterGeneration(0);
 
 SoapySDR::ConverterRegistry::ConverterRegistry(const std::string &sourceFormat, const std::string &targetFormat, const FunctionPriority &priority, ConverterFunction converterFunction)
 {
@@ -23,6 +27,7 @@ SoapySDR::ConverterRegistry::ConverterRegistry(const std::string &sourceFormat, 
     }
   
   formatConverters[sourceFormat][targetFormat][priority] = converterFunction;
+  converterGeneration.fetch_add(1, std::memory_order_release);
 
   return;
 }
@@ -94,11 +99,15 @@ SoapySDR::ConverterRegistry::ConverterFunction SoapySDR::ConverterRegistry::getF
 
   // Thread-local cache for hot-path lookups during streaming
   // Avoids triple nested map lookup on every buffer (called thousands of times/sec)
+  // Generation counter ensures cache is invalidated when new converters are registered
   static thread_local std::string cachedSrc;
   static thread_local std::string cachedTgt;
   static thread_local ConverterFunction cachedFunc = nullptr;
+  static thread_local unsigned cachedGen = 0;
 
-  if (cachedFunc != nullptr && sourceFormat == cachedSrc && targetFormat == cachedTgt)
+  const unsigned currentGen = converterGeneration.load(std::memory_order_acquire);
+  if (cachedFunc != nullptr && cachedGen == currentGen &&
+      sourceFormat == cachedSrc && targetFormat == cachedTgt)
   {
       return cachedFunc;
   }
@@ -125,6 +134,7 @@ SoapySDR::ConverterRegistry::ConverterFunction SoapySDR::ConverterRegistry::getF
   cachedFunc = formatConverters[sourceFormat][targetFormat].rbegin()->second;
   cachedSrc = sourceFormat;
   cachedTgt = targetFormat;
+  cachedGen = currentGen;
   return cachedFunc;
 }
 

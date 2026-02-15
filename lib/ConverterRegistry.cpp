@@ -92,6 +92,17 @@ SoapySDR::ConverterRegistry::ConverterFunction SoapySDR::ConverterRegistry::getF
 {
   lateLoadDefaultConverters();
 
+  // Thread-local cache for hot-path lookups during streaming
+  // Avoids triple nested map lookup on every buffer (called thousands of times/sec)
+  static thread_local std::string cachedSrc;
+  static thread_local std::string cachedTgt;
+  static thread_local ConverterFunction cachedFunc = nullptr;
+
+  if (cachedFunc != nullptr && sourceFormat == cachedSrc && targetFormat == cachedTgt)
+  {
+      return cachedFunc;
+  }
+
   if (formatConverters.count(sourceFormat) == 0)
     {
       throw std::runtime_error("ConverterRegistry::getFunction() conversion source not registered; "
@@ -110,7 +121,11 @@ SoapySDR::ConverterRegistry::ConverterFunction SoapySDR::ConverterRegistry::getF
                                "sourceFormat="+sourceFormat+", targetFormat="+targetFormat);
     }
 
-  return formatConverters[sourceFormat][targetFormat].rbegin()->second;
+  // Populate cache for next hot-path lookup
+  cachedFunc = formatConverters[sourceFormat][targetFormat].rbegin()->second;
+  cachedSrc = sourceFormat;
+  cachedTgt = targetFormat;
+  return cachedFunc;
 }
 
 SoapySDR::ConverterRegistry::ConverterFunction SoapySDR::ConverterRegistry::getFunction(const std::string &sourceFormat, const std::string &targetFormat, const FunctionPriority &priority)

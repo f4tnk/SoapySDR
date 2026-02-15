@@ -651,6 +651,10 @@ static void genericCU8toCS8(const void *srcBuff, void *dstBuff, const size_t num
  */
 void lateLoadDefaultConverters(void)
 {
+    // Load SIMD-optimized converters first (higher priority)
+    extern void lateLoadSIMDConverters(void);
+    lateLoadSIMDConverters();
+
     static SoapySDR::ConverterRegistry registerGenericF32toF32(SOAPY_SDR_F32, SOAPY_SDR_F32, SoapySDR::ConverterRegistry::GENERIC, &genericF32toF32);
     static SoapySDR::ConverterRegistry registerGenericS32toS32(SOAPY_SDR_S32, SOAPY_SDR_S32, SoapySDR::ConverterRegistry::GENERIC, &genericS32toS32);
     static SoapySDR::ConverterRegistry registerGenericS16toS16(SOAPY_SDR_S16, SOAPY_SDR_S16, SoapySDR::ConverterRegistry::GENERIC, &genericS16toS16);

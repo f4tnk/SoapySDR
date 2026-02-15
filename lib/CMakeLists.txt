@@ -23,6 +23,7 @@ add_library(SoapySDR SHARED
     Formats.cpp
     ConverterRegistry.cpp
     DefaultConverters.cpp
+    SIMDConverters.cpp
     #C API support sources
     TypesC.cpp
     ModulesC.cpp
@@ -81,6 +82,29 @@ if(CMAKE_COMPILER_IS_GNUCXX OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
     target_compile_options(SoapySDR PUBLIC -Wall)
     target_compile_options(SoapySDR PUBLIC -Wextra)
     target_compile_options(SoapySDR PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>)
+
+    # SDR performance optimization flags (F4TNK)
+    include(CheckCXXCompilerFlag)
+
+    CHECK_CXX_COMPILER_FLAG("-march=native" HAS_MARCH_NATIVE)
+    if(HAS_MARCH_NATIVE)
+        target_compile_options(SoapySDR PRIVATE -march=native)
+    endif()
+
+    CHECK_CXX_COMPILER_FLAG("-ffast-math" HAS_FAST_MATH)
+    if(HAS_FAST_MATH)
+        target_compile_options(SoapySDR PRIVATE -ffast-math)
+    endif()
+
+    CHECK_CXX_COMPILER_FLAG("-ftree-vectorize" HAS_TREE_VECTORIZE)
+    if(HAS_TREE_VECTORIZE)
+        target_compile_options(SoapySDR PRIVATE -ftree-vectorize)
+    endif()
+
+    CHECK_CXX_COMPILER_FLAG("-flto" HAS_LTO)
+    if(HAS_LTO)
+        target_compile_options(SoapySDR PRIVATE -flto)
+    endif()
 endif()
 
 if (MSVC)

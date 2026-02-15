@@ -94,8 +94,9 @@ void SoapySDR::Device::closeStream(Stream *)
 
 size_t SoapySDR::Device::getStreamMTU(Stream *) const
 {
-    //provide a non-zero default when the implementation does not overload the MTU
-    return 1024;
+    //provide a larger default MTU for better SDR throughput
+    //reduces per-call overhead in readStream/writeStream
+    return 65536;
 }
 
 int SoapySDR::Device::activateStream(Stream *, const int flags, const long long, const size_t)

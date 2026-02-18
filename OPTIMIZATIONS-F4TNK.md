@@ -13,7 +13,7 @@ SoapySDR is the **core middleware** of the SDR stack: every radio sample passes 
 
 This branch replaces the 12 most critical conversion paths with **SSE2 SIMD** implementations processing **4 to 16 samples per cycle**, with hardware prefetch, thread-local cache, and a 64× larger MTU.
 
-**19 optimizations** — Estimated gain: **×4 to ×8 on format conversions**.
+**23 optimizations** — Estimated gain: **×4 to ×8 on format conversions (×16 AVX2 path)**.
 
 ---
 
@@ -30,7 +30,7 @@ graph TB
         direction TB
         CACHE["Thread-Local Cache<br/>O(1) instead of O(3×log n)"]
         REG["ConverterRegistry<br/>Priority: CUSTOM > VECTORIZED > GENERIC"]
-        SIMD["SIMDConverters.cpp<br/>12 SSE2 functions + Prefetch"]
+        SIMD["SIMDConverters.cpp<br/>12 SSE2 + 4 AVX2 functions + Prefetch"]
         MTU["MTU 65536<br/>×64 vs default"]
         FLAGS["Compiler Flags<br/>-march=native -ffast-math<br/>-ftree-vectorize -flto"]
     end
@@ -106,14 +106,14 @@ graph LR
     CU16["CU16<br/>SDRPlay"]
     CF32["CF32<br/>Native float"]
 
-    CU8 -->|"SSE2 ×4"| CF32
-    CF32 -->|"SSE2 ×4"| CU8
-    CS8 -->|"SSE2 ×4"| CF32
-    CF32 -->|"SSE2 ×4"| CS8
-    CS16 -->|"SSE2 ×4"| CF32
-    CF32 -->|"SSE2 ×4"| CS16
-    CU16 -->|"SSE2 ×4"| CF32
-    CF32 -->|"SSE2 ×4"| CU16
+    CU8 -->|"SSE2 ×8 / AVX2 ×16"| CF32
+    CF32 -->|"SSE2 ×8"| CU8
+    CS8 -->|"SSE2 ×8 / AVX2 ×16"| CF32
+    CF32 -->|"SSE2 ×8"| CS8
+    CS16 -->|"SSE2 ×8 / AVX2 ×16"| CF32
+    CF32 -->|"SSE2 ×8 / AVX2 ×16"| CS16
+    CU16 -->|"SSE2 ×8"| CF32
+    CF32 -->|"SSE2 ×8"| CU16
 
     CU8 -->|"SSE2 ×16<br/>Direct integer"| CS16
     CS16 -->|"SSE2 ×16<br/>Direct integer"| CU8
@@ -208,6 +208,22 @@ graph LR
 | 11 | CF32 → CF32 | `memcpy` fast-path / SSE2 scale | **4** | All |
 | 12 | CS16 → CS16 | `memcpy` fast-path / SSE2 scale via float | **8** | All |
 
+### AVX2 Wide-Path Converters (`SIMDConverters.cpp` — F4TNK)
+
+When `__AVX2__` is defined (automatically set by `-march=native` on Haswell+/Ryzen+),
+the 4 hottest conversion paths gain a 256-bit wide-loop that runs **before** the SSE2 loop
+as the primary path — SSE2 handles the remaining `< 16` element tail.
+
+| # | Conversion | Technique | Samples/iter | vs SSE2 |
+|:-:|:-----------|:----------|:------------:|:-------:|
+| 20 | CS16 → CF32 | AVX2 `_mm256_cvtepi16_epi32` × 2 halves | **16** | **×2** |
+| 21 | CF32 → CS16 | AVX2 `_mm256_cvtps_epi32` + `_mm256_packs_epi32` + `_mm256_permute4x64` | **16** | **×2** |
+| 22 | CU8 → CF32 | AVX2 `_mm256_cvtepu8_epi16` + `_mm256_cvtepi16_epi32` × 2 | **16** | **×2** |
+| 23 | CS8 → CF32 | AVX2 `_mm256_cvtepi8_epi16` + `_mm256_cvtepi16_epi32` × 2 | **16** | **×2** |
+
+All AVX2 loops use `_MM_HINT_T1` prefetch (L2) instead of `_MM_HINT_T0` (L1)
+because with MTU=65536 the working set (512KB for CF32) exceeds L1.
+
 ### Hardware Prefetch
 
 | # | Detail | Impact |
@@ -241,7 +257,7 @@ graph LR
 
 ```
 lib/
-├── SIMDConverters.cpp        ★ NEW — 722 lines, 12 SSE2 functions
+├── SIMDConverters.cpp        ★ MODIFIED — +4 AVX2 wide loops (mods 20-23)
 ├── DefaultConverters.cpp     ★ Hook lateLoadSIMDConverters()
 ├── ConverterRegistry.cpp     ★ Thread-local cache for getFunction()
 ├── Device.cpp                ★ MTU 65536
@@ -254,7 +270,7 @@ lib/
 
 | Platform | Behavior |
 |:---------|:---------|
-| **x86-64** (Intel/AMD) | Native SSE2 — 4 to 16 samples/cycle |
+| **x86-64** (Intel/AMD) | SSE2 baseline — 8 samples/cycle; **AVX2 (Haswell+/Ryzen)** — 16 samples/cycle |
 | **ARM** (Raspberry Pi) | Scalar fallback with `__restrict__` for auto-vectorization |
 | **Windows** (MSVC) | SSE2 via `_M_X64`, native MSVC flags |
 | **macOS** (Apple Silicon) | Optimized scalar fallback |
@@ -325,7 +341,7 @@ graph TB
     end
 
     subgraph "Middleware — F4TNK Optimized"
-        SOAPY["SoapySDR Core<br/>★ 19 optimizations"]
+        SOAPY["SoapySDR Core<br/>★ 23 optimizations"]
         WRAP["SoapyAirspy<br/>★ 21 optimizations"]
     end
 
@@ -351,7 +367,7 @@ graph TB
     style HW fill:#f39c12,color:#fff,stroke:#e67e22,stroke-width:2px
 ```
 
-**Total: 64 optimizations** across the full SDR chain.
+**Total: 68 optimizations** across the full SDR chain.
 
 ---
 

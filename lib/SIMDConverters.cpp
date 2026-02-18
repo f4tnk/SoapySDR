@@ -25,6 +25,15 @@
     #define SOAPY_USE_SSE2 0
 #endif
 
+// Detect AVX2 availability (Intel Haswell+ / AMD Ryzen+)
+// -march=native automatically defines __AVX2__ when supported by the host CPU.
+#if defined(__AVX2__)
+    #define SOAPY_USE_AVX2 1
+    #include <immintrin.h>
+#else
+    #define SOAPY_USE_AVX2 0
+#endif
+
 // Restrict hint for auto-vectorization
 #if defined(__GNUC__) || defined(__clang__)
     #define SOAPY_RESTRICT __restrict__
@@ -44,44 +53,46 @@ static void simdCS16toCF32(const void *srcBuff, void *dstBuff, const size_t numE
     const float fScaler = float(scaler / 32768.0);
 
 #if SOAPY_USE_SSE2
-    // Process 4 complex samples (8 int16) at a time
     const __m128 vScaler = _mm_set1_ps(fScaler);
-    const __m128i zero = _mm_setzero_si128();
     size_t i = 0;
 
+#if SOAPY_USE_AVX2
+    // Mod 20 — AVX2: 8 complex samples (16 int16) per iteration — ×2 vs SSE2
+    const __m256 vScaler256 = _mm256_set1_ps(fScaler);
+    for (; i + 15 < total; i += 16)
+    {
+        _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T1);
+        __m256i vi16 = _mm256_loadu_si256((const __m256i*)(src + i));
+        // sign-extend lower/upper 8 int16 -> 8 int32 (AVX2 one-shot)
+        __m256i lo32 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vi16));
+        __m256i hi32 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vi16, 1));
+        __m256 flo = _mm256_mul_ps(_mm256_cvtepi32_ps(lo32), vScaler256);
+        __m256 fhi = _mm256_mul_ps(_mm256_cvtepi32_ps(hi32), vScaler256);
+        _mm256_storeu_ps(dst + i,     flo);
+        _mm256_storeu_ps(dst + i + 8, fhi);
+    }
+#endif
+
+    // SSE2 tail for remaining < 16 elements
     for (; i + 7 < total; i += 8)
     {
-        // Prefetch 256 bytes ahead (2 cache lines)
         _mm_prefetch((const char*)(src + i + 128), _MM_HINT_T0);
-
-        // Load 8 x int16 (4 complex samples)
         __m128i vi16 = _mm_loadu_si128((const __m128i *)(src + i));
-
-        // Sign-extend lower 4 to int32
         __m128i lo32 = _mm_srai_epi32(_mm_unpacklo_epi16(vi16, vi16), 16);
-        // Sign-extend upper 4 to int32
         __m128i hi32 = _mm_srai_epi32(_mm_unpackhi_epi16(vi16, vi16), 16);
-
-        // Convert int32 -> float and scale
         __m128 flo = _mm_mul_ps(_mm_cvtepi32_ps(lo32), vScaler);
         __m128 fhi = _mm_mul_ps(_mm_cvtepi32_ps(hi32), vScaler);
-
-        // Store 8 floats (4 complex samples)
-        _mm_storeu_ps(dst + i, flo);
+        _mm_storeu_ps(dst + i,     flo);
         _mm_storeu_ps(dst + i + 4, fhi);
     }
 
     // Scalar tail
     for (; i < total; i++)
-    {
         dst[i] = float(src[i]) * fScaler;
-    }
+
 #else
-    // Scalar fallback with restrict for auto-vectorization
     for (size_t i = 0; i < total; i++)
-    {
         dst[i] = float(src[i]) * fScaler;
-    }
 #endif
 }
 
@@ -100,30 +111,38 @@ static void simdCF32toCS16(const void *srcBuff, void *dstBuff, const size_t numE
     const __m128 vScaler = _mm_set1_ps(fScaler);
     size_t i = 0;
 
+#if SOAPY_USE_AVX2
+    // Mod 21 — AVX2: 8 complex samples (16 floats in / 16 int16 out) per iteration
+    const __m256 vScaler256 = _mm256_set1_ps(fScaler);
+    for (; i + 15 < total; i += 16)
+    {
+        _mm_prefetch((const char*)(src + i + 64), _MM_HINT_T1);
+        __m256 fa = _mm256_loadu_ps(src + i);
+        __m256 fb = _mm256_loadu_ps(src + i + 8);
+        fa = _mm256_mul_ps(fa, vScaler256);
+        fb = _mm256_mul_ps(fb, vScaler256);
+        __m256i ia = _mm256_cvtps_epi32(fa);
+        __m256i ib = _mm256_cvtps_epi32(fb);
+        // packs_epi32 works within each 128-bit lane; permute to restore sequential order
+        __m256i packed = _mm256_packs_epi32(ia, ib);
+        packed = _mm256_permute4x64_epi64(packed, 0xD8); // [0,2,1,3]
+        _mm256_storeu_si256((__m256i*)(dst + i), packed);
+    }
+#endif
+
     for (; i + 7 < total; i += 8)
     {
         _mm_prefetch((const char*)(src + i + 64), _MM_HINT_T0);
-
-        // Load 8 floats
         __m128 flo = _mm_loadu_ps(src + i);
         __m128 fhi = _mm_loadu_ps(src + i + 4);
-
-        // Scale
         flo = _mm_mul_ps(flo, vScaler);
         fhi = _mm_mul_ps(fhi, vScaler);
-
-        // Convert float -> int32
         __m128i ilo = _mm_cvtps_epi32(flo);
         __m128i ihi = _mm_cvtps_epi32(fhi);
-
-        // Pack int32 -> int16 with saturation
         __m128i packed = _mm_packs_epi32(ilo, ihi);
-
-        // Store 8 int16
         _mm_storeu_si128((__m128i *)(dst + i), packed);
     }
 
-    // Scalar tail
     for (; i < total; i++)
     {
         float v = src[i] * fScaler;
@@ -160,40 +179,45 @@ static void simdCU8toCF32(const void *srcBuff, void *dstBuff, const size_t numEl
     const __m128i zero = _mm_setzero_si128();
     size_t i = 0;
 
+#if SOAPY_USE_AVX2
+    // Mod 22 — AVX2: 8 complex samples (16 bytes in / 16 floats out) per iteration
+    const __m256 vScaler256 = _mm256_set1_ps(fScaler);
+    const __m256 vOffset256 = _mm256_set1_ps(fOffset);
+    for (; i + 15 < total; i += 16)
+    {
+        _mm_prefetch((const char*)(src + i + 512), _MM_HINT_T1);
+        // Load 16 uint8, zero-extend to 16 uint16 in 256 bits (AVX2 one-shot)
+        __m128i vu8 = _mm_loadu_si128((const __m128i*)(src + i));
+        __m256i vu16 = _mm256_cvtepu8_epi16(vu8);
+        // Zero-extend lower/upper 8 uint16 -> 8 int32
+        __m256i lo32 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vu16));
+        __m256i hi32 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vu16, 1));
+        __m256 flo = _mm256_mul_ps(_mm256_sub_ps(_mm256_cvtepi32_ps(lo32), vOffset256), vScaler256);
+        __m256 fhi = _mm256_mul_ps(_mm256_sub_ps(_mm256_cvtepi32_ps(hi32), vOffset256), vScaler256);
+        _mm256_storeu_ps(dst + i,     flo);
+        _mm256_storeu_ps(dst + i + 8, fhi);
+    }
+#endif
+
     for (; i + 7 < total; i += 8)
     {
         _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T0);
-
-        // Load 8 bytes into lower 64 bits
         __m128i vu8 = _mm_loadl_epi64((const __m128i *)(src + i));
-
-        // Zero-extend uint8 -> uint16
         __m128i vu16 = _mm_unpacklo_epi8(vu8, zero);
-
-        // Zero-extend lower 4 uint16 -> int32
         __m128i lo32 = _mm_unpacklo_epi16(vu16, zero);
-        // Zero-extend upper 4 uint16 -> int32
         __m128i hi32 = _mm_unpackhi_epi16(vu16, zero);
-
-        // Convert int32 -> float, subtract offset, scale
         __m128 flo = _mm_mul_ps(_mm_sub_ps(_mm_cvtepi32_ps(lo32), vOffset), vScaler);
         __m128 fhi = _mm_mul_ps(_mm_sub_ps(_mm_cvtepi32_ps(hi32), vOffset), vScaler);
-
-        // Store 8 floats
-        _mm_storeu_ps(dst + i, flo);
+        _mm_storeu_ps(dst + i,     flo);
         _mm_storeu_ps(dst + i + 4, fhi);
     }
 
-    // Scalar tail
     for (; i < total; i++)
-    {
         dst[i] = (float(src[i]) - fOffset) * fScaler;
-    }
+
 #else
     for (size_t i = 0; i < total; i++)
-    {
         dst[i] = (float(src[i]) - fOffset) * fScaler;
-    }
 #endif
 }
 
@@ -279,40 +303,46 @@ static void simdCS8toCF32(const void *srcBuff, void *dstBuff, const size_t numEl
     const __m128i zero = _mm_setzero_si128();
     size_t i = 0;
 
+#if SOAPY_USE_AVX2
+    // Mod 23 — AVX2: 8 complex samples (16 int8 in / 16 floats out) per iteration
+    const __m256 vScaler256 = _mm256_set1_ps(fScaler);
+    for (; i + 15 < total; i += 16)
+    {
+        _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T1);
+        // Load 16 int8, sign-extend to 16 int16 in 256 bits (AVX2 one-shot)
+        __m128i vi8 = _mm_loadu_si128((const __m128i*)(src + i));
+        __m256i vi16 = _mm256_cvtepi8_epi16(vi8);
+        // sign-extend lower/upper 8 int16 -> 8 int32
+        __m256i lo32 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vi16));
+        __m256i hi32 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vi16, 1));
+        __m256 flo = _mm256_mul_ps(_mm256_cvtepi32_ps(lo32), vScaler256);
+        __m256 fhi = _mm256_mul_ps(_mm256_cvtepi32_ps(hi32), vScaler256);
+        _mm256_storeu_ps(dst + i,     flo);
+        _mm256_storeu_ps(dst + i + 8, fhi);
+    }
+#endif
+
     for (; i + 7 < total; i += 8)
     {
         _mm_prefetch((const char*)(src + i + 256), _MM_HINT_T0);
-
-        // Load 8 bytes
         __m128i vi8 = _mm_loadl_epi64((const __m128i *)(src + i));
-
-        // Sign-extend int8 -> int16
-        // Compare with zero for sign bits
         __m128i sign = _mm_cmpgt_epi8(zero, vi8);
         __m128i vi16 = _mm_unpacklo_epi8(vi8, sign);
-
-        // Sign-extend int16 -> int32
         __m128i signw = _mm_srai_epi16(vi16, 15);
         __m128i lo32 = _mm_unpacklo_epi16(vi16, signw);
         __m128i hi32 = _mm_unpackhi_epi16(vi16, signw);
-
-        // Convert int32 -> float and scale
         __m128 flo = _mm_mul_ps(_mm_cvtepi32_ps(lo32), vScaler);
         __m128 fhi = _mm_mul_ps(_mm_cvtepi32_ps(hi32), vScaler);
-
-        _mm_storeu_ps(dst + i, flo);
+        _mm_storeu_ps(dst + i,     flo);
         _mm_storeu_ps(dst + i + 4, fhi);
     }
 
     for (; i < total; i++)
-    {
         dst[i] = float(src[i]) * fScaler;
-    }
+
 #else
     for (size_t i = 0; i < total; i++)
-    {
         dst[i] = float(src[i]) * fScaler;
-    }
 #endif
 }
 

@@ -7,6 +7,7 @@
 #include <SoapySDR/Modules.hpp>
 #include <SoapySDR/Logger.hpp>
 #include <algorithm>
+#include <iostream>
 #include <stdexcept>
 #include <exception>
 #include <future>
@@ -202,8 +203,9 @@ SoapySDR::Device* SoapySDR::Device::make(const Kwargs &inputArgs)
         if (discoveredArgs.count("driver")) driverName = discoveredArgs.at("driver");
         std::string label;
         if (discoveredArgs.count("label")) label = discoveredArgs.at("label");
-        SoapySDR::logf(SOAPY_SDR_INFO, "SoapySDR::Device::make() — driver=%s %s",
-            driverName.c_str(), label.c_str());
+        std::cerr << "SoapySDR | Device::make() driver=" << driverName;
+        if (!label.empty()) std::cerr << " label=" << label;
+        std::cerr << std::endl;
     }
 
     return device;
